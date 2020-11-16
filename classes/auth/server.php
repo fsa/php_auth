@@ -17,6 +17,41 @@ class Server {
     private $client_id;
     private $state;
 
+    public static $token;
+
+    public static function grantAccess(array $scope=null): void {
+        $bearer=getenv('HTTP_AUTHORIZATION');
+        if (!preg_match('/Bearer\s(\S+)/', $bearer, $matches)) {
+            header('WWW-Authenticate: Bearer realm="The access token required"');
+            httpResponse::error(401);
+            exit;
+        }
+        $token=self::fetchTokensByAccessToken($matches[1]);
+        if (!$token) {
+            header('WWW-Authenticate: Bearer error="invalid_token",error_description="Invalid access token"');
+            httpResponse::error(401);
+            exit;
+        }
+        if($token->expired) {
+            header('WWW-Authenticate: Bearer error="invalid_token",error_description="The access token expired"');
+            httpResponse::error(401);
+            exit;
+        }
+        if(!is_null($scope)) {
+            #TODO проверить права доступа
+            if(0) {
+                header('WWW-Authenticate: Bearer error="insufficient_scope",error_description="The request requires higher privileges than provided by the access token."');
+                httpResponse::error(403);
+                exit;
+            }
+        }
+        self::$token=$token;
+    }
+
+    public static function getUserId() {
+        return self::$token->user_id;
+    }
+
     public function getResponseType(): bool {
         $response_type=filter_input(INPUT_GET, 'response_type');
         if ($response_type) {
@@ -72,9 +107,14 @@ class Server {
         $scope=filter_input(INPUT_GET, 'scope');
         $client=$this->fetchClient($client_id);
         if (!$client) {
-            httpResponse::json(['error'=>'unauthorized_client']);
+            httpResponse::showError('Неверный код клиента');
+        }
+        $allow_uris=json_decode($client->redirect_uris);
+        if(array_search($redirect_uri, $allow_uris)===false) {
+            httpResponse::showError('Адрес для перенаправления не яляется разрешённым.');
         }
         $user_id=Session::getUser()->id;
+        #TODO отобразить диалог выбора прав доступа
         $scope=User::checkScope($scope, $user_id);
         $code=$this->genCode();
         $s=DB::prepare('INSERT INTO auth_tokens (client_id, user_id, code, scope) VALUES (?, ?, ?, ?)');
@@ -215,7 +255,7 @@ class Server {
     }
 
     private function fetchClient($client_id) {
-        $s=DB::prepare('SELECT * FROM auth_server WHERE client_id=?');
+        $s=DB::prepare('SELECT id, client_id, client_secret, array_to_json(redirect_uris) AS redirect_uris, user_id FROM auth_server WHERE client_id=?');
         $s->execute([$client_id]);
         return $s->fetch(PDO::FETCH_OBJ);
     }
@@ -242,9 +282,9 @@ class Server {
         }        
     }
 
-    public static function revoke($access_token): bool {
+    public static function revoke(): bool {
         $s=DB::prepare('DELETE FROM auth_tokens WHERE access_token=?');
-        $s->execute([$access_token]);
+        $s->execute([self::$token->access_token]);
         return ($s->rowCount()==1)?true:false;
     }
 
